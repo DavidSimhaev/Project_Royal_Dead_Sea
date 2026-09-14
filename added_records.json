@@ -1,0 +1,32 @@
+[
+    {
+        "name": "not_understood",
+        "file_kokoro": "not_understood_kokoro.mp3",
+        "file_eleven": "not_understood.mp3",
+        "text_male": "מצטער, לא הצלחתי להבין את בקשתכם. אני מתמחה במתן מידע וסיוע בנושאים הקשורים למלון בלבד. תוכלו לנסות לנסח מחדש את בקשתכם?",
+        "text_female": "מצטערת, לא הצלחתי להבין את בקשתכם. אני מתמחה במתן מידע וסיוע בנושאים הקשורים למלון בלבד. תוכלו לנסות לנסח מחדש את בקשתכם?",
+        "kokoro_created": true,
+        "eleven_created": true,
+        "created_at": "2026-09-10 05:31:23"
+    },
+    {
+        "name": "transfer_complete_SPA",
+        "file_kokoro": "transfer_complete_SPA_kokoro.mp3",
+        "file_eleven": "transfer_complete_SPA.mp3",
+        "text_male": "בסדר גמור. אני מעביר אותכם למחלקת הספא. אנא המתינו",
+        "text_female": "בסדר גמור. אני מעבירה אותכם למחלקת הספא. אנא המתינו",
+        "kokoro_created": true,
+        "eleven_created": true,
+        "created_at": "2026-09-10 05:35:03"
+    },
+    {
+        "name": "Ok_so_you_need",
+        "file_kokoro": null,
+        "file_eleven": "Ok_so_you_need.mp3",
+        "text_male": "הבנתי. אז אתם רוצים:",
+        "text_female": "הבנתי. אז אתם רוצים:",
+        "kokoro_created": false,
+        "eleven_created": true,
+        "created_at": "2026-09-11 20:38:08"
+    }
+]

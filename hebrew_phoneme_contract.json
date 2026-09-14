@@ -1,0 +1,41 @@
+{
+  "phonikud_version": "0.4.1",
+  "note": "phonemes = phonikud.phonemize -> normalize_to_kokoro (see README). misaki.he must match THESE strings.",
+  "pairs": [
+    {
+      "text": "שָׁלוֹם, מָה שְׁלוֹמְךָ הַיּוֹם?",
+      "phonemes": "ʃalˈom, mˈa ʃlomχˈa hajˈom?",
+      "dropped": {}
+    },
+    {
+      "text": "הַצַּדִּיק וְהַחֲצוֹצְרָה צִלְצְלוּ בְּרֹאשׁ הָהָר.",
+      "phonemes": "hatsadˈik vehaχatsotsʁˈa tsiltslˈu bʁˈoʃ hahˈaʁ.",
+      "dropped": {}
+    },
+    {
+      "text": "כַּמָּה עוֹלֶה כַּרְטִיס לָרַכֶּבֶת לְתֵל אָבִיב?",
+      "phonemes": "kamˈa ʔolˈe kaʁtˈis laʁakevˈet ltˈel ʔavˈiv?",
+      "dropped": {}
+    },
+    {
+      "text": "בְּשָׁנָת 2,000 הָיוּ כְּ12 אֲלָפִים תּוֹשָׁבִים.",
+      "phonemes": "bʃanˈat ʔalpˈajim hajˈu kˈ ʃˈtm ʔesʁˈe ʔalafˈim toʃavˈim.",
+      "dropped": {}
+    },
+    {
+      "text": "אֲנִי אוֹהֵב לִלְמוֹד שָׂפוֹת חֲדָשׁוֹת וּמְעַנְיְינוֹת.",
+      "phonemes": "ʔanˈi ʔohˈev lilmˈod safˈot χadaʃˈot umʔanjnˈot.",
+      "dropped": {}
+    },
+    {
+      "text": "רְחוֹב זַ׳בּוֹטִינְסְקִי פּוֹנֶה יְמִינָה.",
+      "phonemes": "ʁχˈov ʒabotinskˈi ponˈe jminˈa.",
+      "dropped": {}
+    },
+    {
+      "text": "תּוֹדָה רַבָּה עַל כָּל הָעֶזְרָה שֶׁלְּךָ!",
+      "phonemes": "todˈa ʁabˈa ʔˈal kˈal haʔezʁˈa ʃelχˈa!",
+      "dropped": {}
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+    "version": "2.3",
+    "created": "2026-09-11 21:01:03",
+    "records": {
+        "transfer_confirm": {
+            "kokoro_file": "transfer_confirm_kokoro.mp3",
+            "eleven_file": "transfer_confirm.mp3",
+            "description": "Подтверждение перевода на персонала",
+            "text": "הבנתי אתכם. תרצו שאעביר אתכם לנציג אנושי שיוכל לעזור לכם?",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "transfer_complete": {
+            "kokoro_file": "transfer_complete_kokoro.mp3",
+            "eleven_file": "transfer_complete.mp3",
+            "description": "Перевод на персонала выполнен",
+            "text": "הפנייה מועברת כעת לנציג אנושי להמשך טיפול. שיהיה לכם חופשה מהנה.",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "not_understood": {
+            "kokoro_file": "not_understood_kokoro.mp3",
+            "eleven_file": "not_understood.mp3",
+            "description": "ИИ не понял запрос (первый раз)",
+            "text": "מצטער, לא הצלחתי להבין את בקשתכם. אני מתמחה במתן מידע וסיוע בנושאים הקשורים למלון בלבד. תוכלו לנסות לנסח מחדש את בקשתכם?",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "spa_transfer_complete": {
+            "kokoro_file": "spa_transfer_complete_kokoro.mp3",
+            "eleven_file": "spa_transfer_complete.mp3",
+            "description": "Подтверждение перевода в спа-отдел",
+            "text": "בסדר גמור. אני מעביר אותכם למחלקת הספא. מאחלים לכם חופשה מהנה.",
+            "kokoro_exists": false,
+            "eleven_exists": false
+        },
+        "info_breakfast": {
+            "kokoro_file": "info_breakfast_kokoro.mp3",
+            "eleven_file": "info_breakfast.mp3",
+            "description": "Завтрак",
+            "text": "ארוחת בוקר מוגשת בין 7 בבוקר עד 10 בבוקר בעולם המסעדה שבקומה ג'י",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "info_lunch": {
+            "kokoro_file": "info_lunch_kokoro.mp3",
+            "eleven_file": "info_lunch.mp3",
+            "description": "Обед",
+            "text": "ארוחת צהריים מוגשת בין 1 עד 2 וחצי בצהריים בעולם המסעדה שבקומה ג'י",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "info_dinner": {
+            "kokoro_file": "info_dinner_kokoro.mp3",
+            "eleven_file": "info_dinner.mp3",
+            "description": "Ужин",
+            "text": "ארוחת ערב מוגשת בין 6 בערב עד 9 בערב בעולם המסעדה שבקומה ג'י",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "info_all_meals": {
+            "kokoro_file": "info_all_meals_kokoro.mp3",
+            "eleven_file": "info_all_meals.mp3",
+            "description": "Все трапезы (общая информация)",
+            "text": "ארוחת בוקר בין 7 בבוקר עד 10 בבוקר. ארוחת צהריים בין 1 עד 2 וחצי בצהריים. ארוחת ערב בין 6 בערב עד 9 בערב. כל הארוחות מוגשות במסעדה שבקומה ג'י",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        },
+        "info_lobby": {
+            "kokoro_file": "info_lobby_kokoro.mp3",
+            "eleven_file": "info_lobby.mp3",
+            "description": "Лобби",
+            "text": "לובי מלון פתוח מדי יום בין השעות 11:30 עד 23 בלילה והוא ממוקם בקומה e. אתם מוזמנים לשהות בו לאורך כל שעות הפעילות",
+            "kokoro_exists": true,
+            "eleven_exists": true
+        }
+    }
+}

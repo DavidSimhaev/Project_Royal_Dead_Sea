@@ -1,0 +1,11 @@
+This directory (`inference/kokoro/`) is the Kokoro TTS inference library,
+redistributed here under the Apache License 2.0 — see the LICENSE file in this
+directory. It is NOT covered by the MIT license of the parent repository.
+
+    Upstream:  https://github.com/hexgrad/kokoro   (author: hexgrad)
+    Fork used: https://github.com/semidark/kokoro
+
+Redistributed to pin weight compatibility: the Hebrew model in this project was
+trained against this fork's weight_norm parametrizations API. Upstream pip
+`kokoro` (0.9.x) uses the older weight_g/weight_v naming and silently drops
+decoder weights when loading these weights, producing garbled audio.

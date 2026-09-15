@@ -6,6 +6,11 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):
+    pass
+
 PROJECT_DIR = Path(__file__).resolve().parents[1] / "Project"
 
 

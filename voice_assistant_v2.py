@@ -2,6 +2,14 @@
 import os
 import sys
 
+# В обычном cmd/PowerShell Windows кодировка может быть cp1251. В консоли
+# ассистента есть emoji и иврит, поэтому фиксируем UTF-8 ещё до первых print.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+
 # ⭐ CUDA DLL для CTranslate2 (faster-whisper)
 SITE_PACKAGES = r"C:\Users\david\AppData\Roaming\Python\Python312\site-packages"
 for _p in [
@@ -31,6 +39,7 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime
 from collections import deque
+from dataclasses import dataclass, field
 import random
 import warnings
 warnings.filterwarnings("ignore")
@@ -68,6 +77,10 @@ HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
 os.chdir(HERE)
 sys.path.insert(0, str(HERE))
+WHATSAPP_PROJECT_DIR = HERE.parent / "Project"
+if WHATSAPP_PROJECT_DIR.exists():
+    sys.path.insert(0, str(WHATSAPP_PROJECT_DIR))
+from queue_utils import append_queue_item
 LOADING_SOUND = HERE / "phone-beeps.mp3"
 ROOM_STATUS_FILE = HERE / "room_status.json"
 
@@ -77,6 +90,11 @@ ROOM_STATUS_FILE = HERE / "room_status.json"
 MAX_CHARS_PER_CALL = 250
 MAX_CHARS_PER_DAY = 5000
 KOKORO_COOLDOWN_HOURS = 6
+HOTEL_STATUS_KEY = "__hotel_elevenlabs__"
+STARTUP_ELEVENLABS_STOP_REASON = None
+# После фактического отказа ElevenLabs не пытаемся снова синтезировать,
+# пока в аккаунте не хватит символов на полный максимально допустимый ответ.
+ELEVENLABS_MIN_CHARS_TO_RESUME = MAX_CHARS_PER_CALL
 SILENCE_INTERVAL = 30
 PRE_BUFFER_SIZE = 10
 ENERGY_THRESHOLD = 700
@@ -86,19 +104,35 @@ SPEAK_PAUSE_BEFORE = 0.15
 SPEAK_PAUSE_AFTER = 0.5
 ECHO_PROTECTION_TIME = 0.8
 
+# Постоянный режим нужен для будущей телефонии: процесс остаётся в памяти
+# между последовательными звонками. Обычный запуск сохраняет прежнее
+# поведение: после завершения звонка процесс закрывается.
+CONTINUOUS_SERVICE_MODE = "--continuous" in sys.argv
+
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 JESSICA_VOICE_ID = "cgSgspJ2msm6clMCkdW9"
 ELEVENLABS_MODEL = "eleven_v3"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1"
+GROQ_MODEL = "groq/compound-mini"
 
 WHISPER_MODEL_NAME = "ivrit-ai/whisper-large-v3-turbo-ct2"
 WHISPER_DEVICE = "cuda"
 WHISPER_COMPUTE_TYPE = "int8_float16"
 
 YES_WORDS = ["כן", "נכון", "בסדר", "אוקיי", "אוקי", "בטח", "יאללה"]
-NO_WORDS = ["לא", "לא תודה", "לא צריך", "לא, תודה", "לא רוצה"]
+NO_WORDS = ["לא", "לא תודה", "לא צריך", "לא, תודה", "לא רוצה", "לא נכון"]
+# Короткие естественные варианты «больше ничего не нужно». Это именно
+# законченные фразы: если после "לא" есть новая просьба, они сюда не попадут.
+NATURAL_FINISH_PHRASES = {
+    "זהו", "זהו תודה", "זה הכל", "זה הכול", "זה הכל תודה", "זה הכול תודה",
+    "תודה זהו", "תודה רבה זהו", "תודה זה הכל", "תודה זה הכול",
+    "לא צריך יותר", "לא צריכים יותר", "אין צורך יותר", "אין צורך בעוד משהו",
+    "סיימנו", "זה מספיק", "מספיק תודה",
+}
 
 # ============================================================
 # ЗАГРУЗКА WHISPER
@@ -165,6 +199,46 @@ all_requests = []
 last_activity_time = time.time()
 silence_thread = None
 stop_silence_monitor = False
+call_end_event = threading.Event()
+static_sound_cache = {}
+
+
+@dataclass
+class CallSession:
+    """Изолированное состояние одного гостя.
+
+    Сейчас один процесс обслуживает один аудиоканал за раз. Объект отделяет
+    историю и список просьб от моделей, чтобы следующий этап — SIP-сессии с
+    несколькими параллельными звонками — не смешивал данные гостей.
+    """
+    room_number: str
+    voice_engine: str
+    started_at: float = field(default_factory=time.time)
+    conversation_history: list = field(default_factory=list)
+    all_requests: list = field(default_factory=list)
+
+
+active_session = None
+
+
+def preload_static_audio():
+    """Кэширует постоянные MP3, не затрагивая временные TTS-файлы."""
+    if not CONTINUOUS_SERVICE_MODE:
+        return
+    loaded = 0
+    for audio_dir in (HERE / "ElevenLabs_RECORD", HERE / "Kokoro_RECORD"):
+        if not audio_dir.exists():
+            continue
+        for path in audio_dir.glob("*.mp3"):
+            key = str(path.resolve())
+            if key in static_sound_cache:
+                continue
+            try:
+                static_sound_cache[key] = pygame.mixer.Sound(key)
+                loaded += 1
+            except Exception as e:
+                print(f"⚠️ Не удалось предзагрузить {path.name}: {e}")
+    print(f"⚡ Предзагружено записей: {loaded}")
 
 # ============================================================
 # ДИНЬ-ЦИКЛ
@@ -215,6 +289,10 @@ def start_ding_loop():
 def stop_ding_loop():
     global stop_loading_ding
     stop_loading_ding = True
+    try:
+        ding_channel.stop()
+    except Exception:
+        pass
 
 # ============================================================
 # play_audio
@@ -225,7 +303,15 @@ def play_audio(path, volume=1.0):
         if not Path(path).exists():
             print(f"❌ Не найден: {path}")
             return False
-        sound = pygame.mixer.Sound(str(path))
+        sound_path = str(Path(path).resolve())
+        sound = static_sound_cache.get(sound_path)
+        if sound is None:
+            sound = pygame.mixer.Sound(sound_path)
+            # В постоянном режиме кэшируем только записи проекта. Временные
+            # файлы ElevenLabs/Kokoro нельзя сохранять: они удаляются после
+            # воспроизведения.
+            if CONTINUOUS_SERVICE_MODE and sound_path.startswith(str(HERE.resolve())):
+                static_sound_cache[sound_path] = sound
         sound.set_volume(volume)
         voice_channel.play(sound)
         while voice_channel.get_busy():
@@ -324,8 +410,56 @@ def save_room_status(status):
 def get_today_str():
     return datetime.now().strftime("%Y-%m-%d")
 
-def elevenlabs_has_tokens():
-    """True/False when ElevenLabs responds; None when availability is unknown."""
+
+def get_hotel_elevenlabs_status(status):
+    """Общий счётчик ElevenLabs для всего отеля; Kokoro сюда не попадает."""
+    today = get_today_str()
+    hotel = status.get(HOTEL_STATUS_KEY)
+    if hotel is None:
+        # Миграция старого room_status.json: суммируем уже потраченные сегодня
+        # ElevenLabs-символы по комнатам один раз, прежде чем вести общий счётчик.
+        hotel = {
+            "chars_today": sum(
+                item.get("chars_today", 0)
+                for key, item in status.items()
+                if key != HOTEL_STATUS_KEY
+                and isinstance(item, dict)
+                and item.get("last_reset_day") == today
+            ),
+            "last_reset_day": today,
+        }
+    if hotel.get("last_reset_day") != today:
+        hotel["chars_today"] = 0
+        hotel["last_reset_day"] = today
+        hotel.pop("kokoro_for_day", None)
+    status[HOTEL_STATUS_KEY] = hotel
+    return hotel
+
+
+def set_hotel_kokoro_for_today():
+    status = load_room_status()
+    hotel = get_hotel_elevenlabs_status(status)
+    hotel["kokoro_for_day"] = get_today_str()
+    status[HOTEL_STATUS_KEY] = hotel
+    save_room_status(status)
+
+
+def set_elevenlabs_tokens_depleted():
+    status = load_room_status()
+    hotel = get_hotel_elevenlabs_status(status)
+    hotel["tokens_depleted"] = True
+    status[HOTEL_STATUS_KEY] = hotel
+    save_room_status(status)
+
+
+def clear_elevenlabs_tokens_depleted(status):
+    hotel = get_hotel_elevenlabs_status(status)
+    if hotel.pop("tokens_depleted", None):
+        status[HOTEL_STATUS_KEY] = hotel
+        save_room_status(status)
+
+def elevenlabs_remaining_chars():
+    """Остаток ElevenLabs; None, если API баланса временно недоступен."""
     try:
         response = requests.get(
             "https://api.elevenlabs.io/v1/user/subscription",
@@ -343,12 +477,21 @@ def elevenlabs_has_tokens():
             return None
         remaining = max(0, limit - used)
         print(f"💰 ElevenLabs: осталось {remaining}/{limit} символов")
-        return remaining > 0
+        return remaining
     except Exception as e:
         print(f"⚠️ ElevenLabs: проверка баланса недоступна: {e}")
         return None
 
+
+def elevenlabs_has_tokens():
+    """Совместимая проверка: True/False/None без раскрытия детали баланса."""
+    remaining = elevenlabs_remaining_chars()
+    if remaining is None:
+        return None
+    return remaining > 0
+
 def get_room_engine(room_number):
+    global STARTUP_ELEVENLABS_STOP_REASON
     status = load_room_status()
     room = status.get(str(room_number), {})
     now = time.time()
@@ -367,26 +510,37 @@ def get_room_engine(room_number):
         status[str(room_number)] = room
         save_room_status(status)
         print(f"🔄 Комната {room_number}: сброс")
-    chars_today = room.get("chars_today", 0)
-    if chars_today >= MAX_CHARS_PER_DAY:
-        print(f"🎤 Комната {room_number}: ЛИМИТ 5000/день → KOKORO + stop_request")
-        try:
-            stop_path = HERE / "ElevenLabs_RECORD" / "stop_request_and_changing_line.mp3"
-            if stop_path:
-                play_audio(stop_path)
-        except Exception as e:
-            print(f"⚠️ Не смог проиграть stop: {e}")
-        set_kokoro_cooldown(room_number)
+    hotel = get_hotel_elevenlabs_status(status)
+    if hotel.get("kokoro_for_day") == today or hotel.get("chars_today", 0) >= MAX_CHARS_PER_DAY:
+        print(f"🎤 Отель: ЛИМИТ {MAX_CHARS_PER_DAY}/день → KOKORO до конца дня")
         return 'kokoro'
-    has_tokens = elevenlabs_has_tokens()
-    if has_tokens is False:
-        print(f"🎤 Комната {room_number}: В ELEVENLABS НЕТ ТОКЕНОВ → KOKORO + stop_request")
-        stop_path = HERE / "ElevenLabs_RECORD" / "stop_request_and_changing_line.mp3"
-        if stop_path.exists():
-            play_audio(stop_path)
-        set_kokoro_cooldown(room_number)
+
+    remaining_chars = elevenlabs_remaining_chars()
+    # Ошибка синтеза важнее округлённого/запаздывающего остатка API.
+    # Пока нет запаса на один полный ответ, новые звонки сразу идут в Kokoro.
+    if hotel.get("tokens_depleted"):
+        if remaining_chars is not None and remaining_chars >= ELEVENLABS_MIN_CHARS_TO_RESUME:
+            clear_elevenlabs_tokens_depleted(status)
+            print("🎤 ElevenLabs: баланс восстановлен → ELEVENLABS")
+        else:
+            shown_remaining = "неизвестен" if remaining_chars is None else remaining_chars
+            print(
+                f"🎤 ElevenLabs: после ошибки синтеза остаток {shown_remaining} "
+                f"(< {ELEVENLABS_MIN_CHARS_TO_RESUME}) → KOKORO"
+            )
+            return 'kokoro'
+
+    if remaining_chars == 0:
+        if not hotel.get("tokens_depleted"):
+            hotel["tokens_depleted"] = True
+            status[HOTEL_STATUS_KEY] = hotel
+            save_room_status(status)
+            STARTUP_ELEVENLABS_STOP_REASON = "В ELEVENLABS НЕТ ТОКЕНОВ"
+            print("🎤 ElevenLabs: токены закончились → текущий звонок будет завершён")
+        else:
+            print("🎤 ElevenLabs: токенов нет → KOKORO")
         return 'kokoro'
-    print(f"🎤 Комната {room_number}: ELEVENLABS ({chars_today}/{MAX_CHARS_PER_DAY})")
+    print(f"🎤 Комната {room_number}: ELEVENLABS ({room.get('chars_today', 0)}/{MAX_CHARS_PER_DAY}), отель {hotel.get('chars_today', 0)}/{MAX_CHARS_PER_DAY}")
     return 'eleven'
 
 def update_room_chars(room_number, chars, is_call_end=False):
@@ -401,6 +555,12 @@ def update_room_chars(room_number, chars, is_call_end=False):
     if is_call_end:
         room["chars_this_call"] = 0
     status[str(room_number)] = room
+    # Эта функция вызывается только после успешной озвучки ElevenLabs.
+    # Kokoro не расходует и не увеличивает лимиты.
+    if chars > 0:
+        hotel = get_hotel_elevenlabs_status(status)
+        hotel["chars_today"] = hotel.get("chars_today", 0) + chars
+        status[HOTEL_STATUS_KEY] = hotel
     save_room_status(status)
     return room["chars_this_call"], room["chars_today"]
 
@@ -456,7 +616,9 @@ voice = None
 phonemize_hebrew = None
 g2p = None
 
-if VOICE_ENGINE == 'kokoro':
+if VOICE_ENGINE == 'kokoro' or CONTINUOUS_SERVICE_MODE:
+    if CONTINUOUS_SERVICE_MODE and VOICE_ENGINE != 'kokoro':
+        print("⚡ Постоянный режим: заранее загружаю Kokoro для мгновенного переключения")
     print("📥 Загрузка Kokoro...")
     try:
         import soundfile as sf
@@ -518,6 +680,83 @@ def ensure_kokoro_loaded():
         print(f"❌ Не удалось загрузить Kokoro: {e}")
         return False
 
+
+def configure_call(room_number):
+    """Выбирает движок и аудиозаписи для следующей последовательной сессии."""
+    global ROOM_NUMBER, VOICE_ENGINE, AUDIO_DIR, VOICE_SUFFIX
+    global STARTUP_ELEVENLABS_STOP_REASON, active_session
+
+    ROOM_NUMBER = room_number
+    STARTUP_ELEVENLABS_STOP_REASON = None
+    VOICE_ENGINE = get_room_engine(ROOM_NUMBER)
+    if VOICE_ENGINE == "kokoro":
+        AUDIO_DIR = HERE / "Kokoro_RECORD"
+        VOICE_SUFFIX = "_kokoro"
+        ensure_kokoro_loaded()
+    else:
+        AUDIO_DIR = HERE / "ElevenLabs_RECORD"
+        VOICE_SUFFIX = ""
+    active_session = CallSession(ROOM_NUMBER, VOICE_ENGINE)
+
+
+def reset_call_runtime_state():
+    """Очищает данные прежнего гостя, оставляя Whisper/Kokoro в памяти."""
+    global audio_queue, is_speaking, microphone_active, mic_thread, stop_mic, mic_paused
+    global conversation_history, stop_loading_ding, ding_thread_running, recording_frames
+    global is_recording, current_conversation_text, transfer_to_staff_mode, spa_transfer_mode
+    global room_service_mode, staff_mode_active, chars_this_call, verdict_played, all_requests
+    global last_activity_time, stop_silence_monitor, silence_thread, active_session
+
+    stop_ding_loop()
+    stop_silence_monitor = True
+    stop_mic = False
+    mic_paused = False
+    is_speaking = False
+    microphone_active = False
+    mic_thread = None
+    audio_queue = queue.Queue()
+    recording_frames = []
+    is_recording = False
+    current_conversation_text = []
+    transfer_to_staff_mode = False
+    spa_transfer_mode = False
+    room_service_mode = False
+    staff_mode_active = False
+    chars_this_call = 0
+    verdict_played = False
+    last_activity_time = time.time()
+    silence_thread = None
+    call_end_event.clear()
+    if active_session is None:
+        active_session = CallSession(ROOM_NUMBER, VOICE_ENGINE)
+    conversation_history = active_session.conversation_history
+    all_requests = active_session.all_requests
+
+
+def stop_call_workers():
+    """Освобождает аудиовход перед следующей сессией в постоянном режиме."""
+    global stop_mic, stop_silence_monitor, mic_paused
+    stop_mic = True
+    stop_silence_monitor = True
+    mic_paused = True
+    stop_ding_loop()
+    stop_music()
+    if mic_thread and mic_thread.is_alive():
+        mic_thread.join(timeout=3)
+    if silence_thread and silence_thread.is_alive():
+        silence_thread.join(timeout=2)
+    try:
+        voice_channel.stop()
+    except Exception:
+        pass
+
+
+def finish_current_call(exit_code=0):
+    """Завершает сессию; в --continuous возвращает управление диспетчеру."""
+    call_end_event.set()
+    if not CONTINUOUS_SERVICE_MODE:
+        os._exit(exit_code)
+
 def switch_to_kokoro(reason):
     global VOICE_ENGINE
     print(f"🎤 {reason} → KOKORO + stop_request")
@@ -527,6 +766,42 @@ def switch_to_kokoro(reason):
     set_kokoro_cooldown(ROOM_NUMBER)
     VOICE_ENGINE = 'kokoro'
     ensure_kokoro_loaded()
+
+
+def end_call_after_elevenlabs_limit(reason, room_cooldown=False, hotel_daily_limit=False, tokens_depleted=False):
+    """Останавливает текущий звонок из-за лимита ElevenLabs.
+
+    Kokoro не является причиной этого пути: он не имеет лимитов и не меняет
+    счётчики. При лимите за звонок только следующая сессия этой комнаты будет
+    Kokoro шесть часов; при дневном лимите Kokoro включается всему отелю.
+    """
+    print("=" * 60)
+    print(f"⚠️ ELEVENLABS: {reason}")
+    print("доделать логику когда программа будет готова")
+    print("=" * 60)
+    if room_cooldown:
+        set_kokoro_cooldown(ROOM_NUMBER)
+    if hotel_daily_limit:
+        set_hotel_kokoro_for_today()
+    if tokens_depleted:
+        set_elevenlabs_tokens_depleted()
+
+    stop_ding_loop()
+    stop_path = get_audio_path("stop_request_and_changing_line", engine='eleven')
+    if stop_path:
+        play_audio(stop_path)
+    else:
+        print("❌ Не найден stop_request_and_changing_line.mp3")
+
+    try:
+        stop_recording_and_save()
+    except Exception:
+        pass
+    update_room_chars(ROOM_NUMBER, 0, is_call_end=True)
+    stop_music()
+    stop_ding_loop()
+    time.sleep(1)
+    return finish_current_call()
 
 def elevenlabs_quota_error(response):
     try:
@@ -538,10 +813,8 @@ def elevenlabs_quota_error(response):
 
 def exceeds_daily_limit(chars_to_use):
     status = load_room_status()
-    room = status.get(str(ROOM_NUMBER), {})
-    if room.get("last_reset_day") != get_today_str():
-        return chars_to_use > MAX_CHARS_PER_DAY
-    return room.get("chars_today", 0) + chars_to_use > MAX_CHARS_PER_DAY
+    hotel = get_hotel_elevenlabs_status(status)
+    return hotel.get("chars_today", 0) + chars_to_use > MAX_CHARS_PER_DAY
 
 # ============================================================
 # ОБЩИЕ
@@ -557,6 +830,9 @@ os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 AUDIO_DATABASE_BASE = {
     "transfer_confirm": "transfer_confirm",
     "transfer_complete": "transfer_complete",
+    "transfer_answer_required": "transfer_answer_required",
+    "ai_unavailable_transfer": "ai_unavailable_transfer",
+    "separate_request_or_question": "separate_request_or_question",
     "not_understood": "not_understood",
     "transfer_complete_SPA": "transfer_complete_SPA",
     "continue_conversation": "continue_convershion",
@@ -590,7 +866,11 @@ def get_audio_path(intent_key, engine=None):
         path = (HERE / "Kokoro_RECORD" / "error_kokoro.mp3") if engine == 'kokoro' else (HERE / "ElevenLabs_RECORD" / "error_elevenlabs.mp3")
         return path if path.exists() else None
     if intent_key == "stop_request_and_changing_line":
-        path = HERE / "ElevenLabs_RECORD" / "stop_request_and_changing_line.mp3"
+        path = (
+            HERE / "Kokoro_RECORD" / "stop_request_and_changing_line_kokoro.mp3"
+            if engine == "kokoro"
+            else HERE / "ElevenLabs_RECORD" / "stop_request_and_changing_line.mp3"
+        )
         return path if path.exists() else None
     base_name = AUDIO_DATABASE_BASE.get(intent_key)
     if not base_name:
@@ -603,10 +883,67 @@ def get_audio_path(intent_key, engine=None):
     print(f"⚠️ Файл не найден: {path}")
     return None
 
+
+def is_wifi_related(text):
+    """Internet and Wi-Fi issues always use the recorded Wi-Fi answer, not AI routing."""
+    normalized = text.lower().replace("-", " ")
+    wifi_markers = (
+        "אינטרנט", "אינטר", "וויפי", "ווי פיי", "וויי פיי",
+        "wifi", "wi fi", "wi-fi",
+    )
+    return any(marker in normalized for marker in wifi_markers)
+
+
+def is_urgent_request(text, intent=None):
+    """Страховка для критических фраз, даже если классификатор дал сбой.
+
+    Это именно чрезвычайные случаи: они не идут в обычный цикл накопления
+    просьб и не ждут финального вердикта.
+    """
+    if intent == "urgent":
+        return True
+    normalized = text.lower()
+    urgent_patterns = (
+        ("מעשן", "מסדרון"),             # курят в коридоре
+        ("אדם זר",),                     # незнакомец у комнаты
+        ("מרגיש לא טוב",),               # гостю плохо
+        ("מים", "חשמל"),                # вода рядом с электричеством
+        ("צועקים", "מפחד"),             # крики, гость боится
+        ("ריח שרוף", "שקע"),            # запах гари у розетки
+        ("ילד", "ננעל"),                # ребёнок заперт
+        ("דופק", "לא מזדהה"),           # неизвестный стучит в дверь
+    )
+    return any(all(marker in normalized for marker in pattern) for pattern in urgent_patterns)
+
+
+def is_complaint_request(text, intent=None):
+    """Страховка для явных жалоб, которые сразу передаются персоналу."""
+    if intent == "complaint":
+        return True
+    normalized = text.lower()
+    complaint_patterns = (
+        ("יש לי תלונה",),
+        ("לא רצינו ניקיון",),
+        ("נכנסו", "לחדר", "ניקיון"),
+        ("כל הבעיות", "מנהל"),
+    )
+    return any(all(marker in normalized for marker in pattern) for pattern in complaint_patterns)
+
 # ============================================================
 # WHATSAPP
 # ============================================================
 QUEUE_FILE = Path(r"C:\Users\david\Desktop\WhatsApp\Project\send_queue.json")
+
+
+def enqueue_whatsapp_message(item, label):
+    """Добавляет сообщение без гонки с другим звонком или монитором."""
+    try:
+        queue_size = append_queue_item(QUEUE_FILE, item)
+        print(f"{label} (всего: {queue_size})")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка WhatsApp-очереди: {e}")
+        return False
 
 def send_verdict_to_whatsapp(requests_text, audio_file_path=None):
     print("🔍 send_verdict_to_whatsapp!")
@@ -616,27 +953,48 @@ def send_verdict_to_whatsapp(requests_text, audio_file_path=None):
 
 📋 *האורח מ-{ROOM_NUMBER} ביקש:*
 {requests_text}"""
-    queue_data = []
-    if QUEUE_FILE.exists():
-        try:
-            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-                queue_data = json.load(f)
-        except:
-            queue_data = []
-    queue_data.append({
+    return enqueue_whatsapp_message({
         "id": str(int(time.time() * 1000)),
         "text": message,
         "audio_file": audio_file_path,
         "created_at": time.time()
-    })
-    try:
-        with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-            json.dump(queue_data, f, ensure_ascii=False, indent=4)
-        print(f"📤 В очередь (всего: {len(queue_data)})")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        return False
+    }, "📤 В очередь")
+
+
+def send_urgent_to_whatsapp(urgent_text, audio_file_path=None):
+    """Немедленно ставит чрезвычайный случай в главную очередь WhatsApp."""
+    message = f"""🎤 *הודעה מהמערכת הדיגיטלית* (AI)
+
+🚨 *דחוף — העברה מיידית לצוות*
+
+🏨 *חדר:* {ROOM_NUMBER}
+📋 *דיווח האורח:*
+{urgent_text}"""
+    return enqueue_whatsapp_message({
+        "id": str(int(time.time() * 1000)),
+        "text": message,
+        "audio_file": audio_file_path,
+        "created_at": time.time(),
+        "kind": "urgent",
+    }, "🚨 В WhatsApp-очередь URGENT")
+
+
+def send_complaint_to_whatsapp(complaint_text, audio_file_path=None):
+    """Ставит жалобу гостя в главную очередь WhatsApp для персонала."""
+    message = f"""🎤 *הודעה מהמערכת הדיגיטלית* (AI)
+
+⚠️ *תלונת אורח — להעביר לצוות*
+
+🏨 *חדר:* {ROOM_NUMBER}
+📋 *דיווח האורח:*
+{complaint_text}"""
+    return enqueue_whatsapp_message({
+        "id": str(int(time.time() * 1000)),
+        "text": message,
+        "audio_file": audio_file_path,
+        "created_at": time.time(),
+        "kind": "complaint",
+    }, "⚠️ В WhatsApp-очередь COMPLAINT")
 
 # ============================================================
 # МОНИТОР МОЛЧАНИЯ
@@ -688,7 +1046,8 @@ def silence_monitor():
                     stop_music()
                     stop_ding_loop()
                     time.sleep(1)
-                    os._exit(0)
+                    finish_current_call()
+                    return
             time.sleep(0.5)
         except Exception as e:
             print(f"⚠️ Ошибка: {e}")
@@ -823,18 +1182,25 @@ def is_audio_busy():
     )
 
 def is_yes(text):
-    clean = text.strip().rstrip('.!?,;:').lower()
-    for word in YES_WORDS:
-        if clean == word or clean.startswith(word + " ") or clean.startswith(word + ","):
-            return True
-    return False
+    clean = re.sub(r"[.!?,;:]+", " ", text.strip().lower())
+    clean = " ".join(clean.split())
+    return clean in YES_WORDS
 
 def is_no(text):
-    clean = text.strip().rstrip('.!?,;:').lower()
-    for word in NO_WORDS:
-        if clean == word or clean.startswith(word + " ") or clean.startswith(word + ","):
-            return True
-    return False
+    clean = re.sub(r"[.!?,;:]+", " ", text.strip().lower())
+    clean = " ".join(clean.split())
+    normalized_no_words = {
+        " ".join(re.sub(r"[.!?,;:]+", " ", word.lower()).split())
+        for word in NO_WORDS
+    }
+    return clean in normalized_no_words
+
+
+def is_natural_finish(text):
+    """Безопасно завершает только самостоятельные, законченные ответы гостя."""
+    clean = re.sub(r"[.!?,;:]+", " ", text.strip().lower())
+    clean = " ".join(clean.split())
+    return clean in NATURAL_FINISH_PHRASES
 
 # ============================================================
 # МИКРОФОН
@@ -982,6 +1348,11 @@ def mic_worker():
                     text = fix_recognition_errors(text)
                     if len(text) >= MIN_TEXT_LENGTH:
                         print(f"🎤 ✅ Распознано: {text}")
+                        # Гость уже распознан. Не оставляем «динь-динь» на
+                        # время ответа DeepSeek/Groq: это не ускоряет ИИ и
+                        # только создаёт лишнее ожидание для гостя.
+                        stop_ding_loop()
+                        print("🔕 ДИНЬ СТОП — речь распознана, анализ ИИ")
                         audio_queue.put(text)
                         add_conversation_text("Гость", text)
                         update_activity()
@@ -1086,11 +1457,15 @@ def speak_elevenlabs(text, language="he"):
         chars_to_use = len(clean_text)
         if chars_this_call + chars_to_use > MAX_CHARS_PER_CALL:
             print(f"⚠️ Превышение за звонок: {chars_this_call} + {chars_to_use} > {MAX_CHARS_PER_CALL}")
-            switch_to_kokoro(f"ЛИМИТ {MAX_CHARS_PER_CALL} СИМВОЛОВ ЗА ЗВОНОК")
-            return speak_kokoro(text), 0
+            end_call_after_elevenlabs_limit(
+                f"ЛИМИТ {MAX_CHARS_PER_CALL} СИМВОЛОВ ЗА ЗВОНОК",
+                room_cooldown=True,
+            )
         if exceeds_daily_limit(chars_to_use):
-            switch_to_kokoro(f"ЛИМИТ {MAX_CHARS_PER_DAY} СИМВОЛОВ В ДЕНЬ")
-            return speak_kokoro(text), 0
+            end_call_after_elevenlabs_limit(
+                f"ЛИМИТ {MAX_CHARS_PER_DAY} СИМВОЛОВ В ДЕНЬ",
+                hotel_daily_limit=True,
+            )
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{JESSICA_VOICE_ID}"
         headers = {
             "xi-api-key": ELEVENLABS_API_KEY,
@@ -1129,7 +1504,10 @@ def speak_elevenlabs(text, language="he"):
             return True, chars_to_use
         else:
             if elevenlabs_quota_error(response):
-                switch_to_kokoro(f"ElevenLabs: закончились токены ({response.status_code})")
+                end_call_after_elevenlabs_limit(
+                    f"ElevenLabs: закончились токены ({response.status_code})",
+                    tokens_depleted=True,
+                )
             else:
                 print(f"❌ ElevenLabs: ошибка {response.status_code} → KOKORO")
                 VOICE_ENGINE = 'kokoro'
@@ -1170,7 +1548,10 @@ def handle_limit_exceeded():
     print("=" * 60)
     print(f"⚠️ ЛИМИТ {MAX_CHARS_PER_CALL} СИМВОЛОВ!")
     print("=" * 60)
-    switch_to_kokoro(f"ЛИМИТ {MAX_CHARS_PER_CALL} СИМВОЛОВ ЗА ЗВОНОК")
+    end_call_after_elevenlabs_limit(
+        f"ЛИМИТ {MAX_CHARS_PER_CALL} СИМВОЛОВ ЗА ЗВОНОК",
+        room_cooldown=True,
+    )
 
 # ============================================================
 # ФИНАЛЬНЫЙ ВЕРДИКТ
@@ -1204,7 +1585,7 @@ def play_final_verdict(requests_text):
     stop_music()
     stop_ding_loop()
     time.sleep(1)
-    os._exit(0)
+    return finish_current_call()
 
 # ============================================================
 # SPEAK
@@ -1243,6 +1624,46 @@ def speak(text, language="he"):
 # ============================================================
 # AI С ПАМЯТЬЮ
 # ============================================================
+class AIProvidersUnavailable(Exception):
+    """Ни DeepSeek, ни резервный Groq не смогли ответить."""
+
+
+def create_ai_completion(messages, temperature, max_tokens):
+    """Запрашивает DeepSeek и без задержек переключается на Groq при сбое."""
+    from openai import OpenAI
+
+    providers = [
+        ("DeepSeek", DEEPSEEK_API_KEY, DEEPSEEK_URL, DEEPSEEK_MODEL),
+        ("Groq", GROQ_API_KEY, GROQ_URL, GROQ_MODEL),
+    ]
+    errors = []
+    for provider_name, api_key, base_url, model in providers:
+        if not api_key:
+            errors.append(f"{provider_name}: ключ отсутствует")
+            continue
+        try:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=10.0,
+                max_retries=0,
+            )
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+            print(f"✅ AI: {provider_name}")
+            return response
+        except Exception as e:
+            print(f"⚠️ {provider_name} недоступен: {e}")
+            errors.append(f"{provider_name}: {e}")
+
+    raise AIProvidersUnavailable("; ".join(errors))
+
+
 def ask_ai_with_memory(prompt, language="he"):
     global conversation_history
     print("=" * 60)
@@ -1253,10 +1674,15 @@ def ask_ai_with_memory(prompt, language="he"):
     print(f"📋 Уже собрано просьб: {all_requests}")
 
     current_requests_text = ", ".join(all_requests) if all_requests else "אין"
+    elevenlabs_female_voice_instruction = ""
+    if VOICE_ENGINE == "eleven":
+        elevenlabs_female_voice_instruction = """
+⚠️ הקול שמדבר את התשובה הוא קול נשי. כשאת מדברת על עצמך, השתמשי תמיד בלשון נקבה:
+"אני מבינה", "אני מצטערת", "אני שמחה", "אעביר". לעולם אל תכתבי "אני מבין" או צורת זכר אחרת על עצמך.
+אל האורחים המשיכי לפנות בלשון רבים: לכם / אתם.
+"""
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_URL, timeout=15.0)
         system_prompt = f"""אתה העוזר הדיגיטלי של מלון רויאל ים המלח.
 
 ⚠️ תמיד תחזיר תשובת JSON בלבד!
@@ -1264,17 +1690,23 @@ def ask_ai_with_memory(prompt, language="he"):
 {{
   "understood": true,
   "reply": "הטקסט שתרצה לומר לאורח",
-  "requests": ["מגבות", "שמפו"]
+  "requests": ["מגבות", "שמפו"],
+  "wait_for_more": true,
+  "dialogue_action": "request"
 }}
 
 או אם לא הבנת:
 {{
   "understood": false,
   "reply": "סלחו לי, אשמח להבין בדיוק מה אתם צריכים.",
-  "requests": []
+  "requests": [],
+  "wait_for_more": false,
+  "dialogue_action": "other"
 }}
 
 📌 בקשות שכבר נאספו בשיחה: {current_requests_text}
+
+{elevenlabs_female_voice_instruction}
 
 📌 הכללים:
 
@@ -1284,6 +1716,15 @@ def ask_ai_with_memory(prompt, language="he"):
 4. Если гость говорит "כן"/"לא"/"תודה" — "requests": [].
 5. Если не понял — understood: false.
 6. После 2 непонятых — "מצטער. לא הצלחתי להבין."
+7. בבקשה רגילה שהובנה: תמיד "wait_for_more": true.
+8. "wait_for_more": false רק אם לא הבנת או שאין להמשיך את השיחה.
+
+📌 "dialogue_action" מתאר את משמעות התגובה בהקשר של הבקשות שכבר נאספו:
+- "finish" — האורח אומר שאין לו עוד בקשות: למשל "זהו, תודה", "זה הכל", "לא צריך יותר", "סיימנו". requests חייב להיות [].
+- "continue" — האורח מאשר שיש לו עוד מה לבקש, אך עדיין לא אמר בקשה חדשה: למשל "כן", "נכון", "בסדר". requests חייב להיות [].
+- "request" — האורח מוסיף בקשה חדשה. גם "לא, אני צריך עוד מגבות" הוא request ולא finish.
+- "other" — תשובה שאינה ברורה או אינה תשובה לשאלה אם יש עוד בקשות.
+אם לא נאספו בקשות קודמות, אל תחזיר finish או continue.
 
 ⚠️⚠️⚠️ שדה "requests" — רשימת בקשות **נקיות** בעברית תקנית:
 - "אפשר מגבות לחדר" → ["מגבות לחדר"]
@@ -1292,20 +1733,13 @@ def ask_ai_with_memory(prompt, language="he"):
 - "כן" → []
 - "מתי ארוחת בוקר" → []
 
-⚠️⚠️⚠️ פסק דין סופי (только когда гость сказал כן/לא תודה):
-"העברתי את בקשתכם לצוות: [כל הבקשות]. שיהיה לכם חופשה מהנה!"
-requests: []
+⚠️⚠️⚠️ פסק הדין הסופי נבנה על ידי התוכנית רק אחרי שהאורח אמר "לא" או "לא תודה".
+אל תכתבי את פסק הדין הסופי בעצמך.
 
 📝 תבניות:
 
 🔹 Первый ответ:
 "בשמחה נשלח לכם [רשימת בקשות]. האם אתם רוצים עוד משהו?"
-
-🔹 Второй ответ:
-"הבנתי. אז אתם רוצים [בקשות 1] ו-[בקשות 2], נכון?"
-
-🔹 Финал:
-"העברתי את בקשתכם לצוות: [כל הבקשות]. שיהיה לכם חופשה מהנה!"
 
 ✅ חובה:
 - לדבר בלשון רבים (לכם / אתם)
@@ -1319,13 +1753,7 @@ requests: []
             messages.append(msg)
         messages.append({"role": "user", "content": prompt})
 
-        response = client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=120,
-            response_format={"type": "json_object"}
-        )
+        response = create_ai_completion(messages, temperature=0.3, max_tokens=120)
 
         finish_reason = response.choices[0].finish_reason
         usage = response.usage
@@ -1335,10 +1763,12 @@ requests: []
 
         if not raw_content:
             print(f"❌ Пустой content!")
-            return "לא הצלחתי להבין, נסו שוב", False, []
+            return "לא הצלחתי להבין, נסו שוב", False, [], False, "other"
 
         raw_answer = raw_content.strip()
         requests_list = []
+        wait_for_more = False
+        dialogue_action = "other"
         try:
             parsed = json.loads(raw_answer)
             understood = parsed.get("understood", True)
@@ -1347,42 +1777,69 @@ requests: []
             if not isinstance(requests_list, list):
                 requests_list = []
             requests_list = [r.strip() for r in requests_list if isinstance(r, str) and r.strip()]
+            raw_wait_for_more = parsed.get("wait_for_more")
+            if isinstance(raw_wait_for_more, bool):
+                wait_for_more = raw_wait_for_more
+            else:
+                # Совместимость со старым/неполным JSON: обычная новая просьба
+                # всё равно остаётся в цикле до ответа гостя.
+                wait_for_more = bool(understood and requests_list)
+            candidate_action = parsed.get("dialogue_action", "other")
+            if candidate_action in {"finish", "continue", "request", "other"}:
+                dialogue_action = candidate_action
             if not reply or len(reply.strip()) < 2:
                 reply = "לא הצלחתי להבין, נסו שוב"
         except json.JSONDecodeError:
             understood = True
             reply = raw_answer if len(raw_answer) > 3 else "לא הצלחתי להבין, נסו שוב"
             requests_list = []
+            wait_for_more = False
 
         conversation_history.append({"role": "user", "content": prompt})
         conversation_history.append({"role": "assistant", "content": reply})
         if len(conversation_history) > MAX_HISTORY:
-            conversation_history = conversation_history[-MAX_HISTORY:]
+            # Сохраняем тот же список CallSession, а не подменяем его новым.
+            del conversation_history[:-MAX_HISTORY]
 
         not_understood = not understood
         print(f"💬 reply: '{reply}'")
         print(f"📋 requests от AI: {requests_list}")
+        print(f"↪️ wait_for_more: {wait_for_more}")
+        print(f"↪️ dialogue_action: {dialogue_action}")
         print("=" * 60)
 
-        return reply, not_understood, requests_list
+        return reply, not_understood, requests_list, wait_for_more, dialogue_action
 
+    except AIProvidersUnavailable:
+        raise
     except Exception as e:
         print(f"❌ Ошибка AI: {e}")
-        return "לא הצלחתי להבין, נסו שוב", False, []
+        return "לא הצלחתי להבין, נסו שוב", False, [], False, "other"
 
 # ============================================================
 # AI-КЛАССИФИКАТОР
 # ============================================================
 def ai_detect_intent(user_text, mode="main"):
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_URL, timeout=10.0)
         if mode == "main":
             system_prompt = """אתה מסווג בקשות של אורחי מלון בעברית. תן תשובת JSON בלבד.
 
-1. "transfer" - האורח רוצה לדבר עם נציג אנושי
+1. "urgent" - מצב חירום שמחייב העברה מיידית לצוות, ללא המתנה לתשובת האורח:
+   - מעשנים במסדרון
+   - אדם זר ליד החדר, מישהו דופק בדלת ולא מזדהה
+   - אורח מרגיש לא טוב
+   - מים ליד חשמל, ריח שרוף משקע
+   - קולות צעקה במסדרון והאורח מפחד
+   - ילד נעול בחדר
 
-2. "info" - שאלה או בקשה על נושאי המלון:
+2. "complaint" - תלונה על שירות או על התנהלות במלון, שמחייבת העברה מיידית לצוות:
+   - "נכנסו לחדר שלנו בזמן שלא רצינו ניקיון"
+   - "יש לי תלונה"
+   - "אחרי כל הבעיות בחדר אני רוצה לדבר עם מנהל"
+
+3. "transfer" - האורח רוצה לדבר עם נציג אנושי
+
+4. "info" - שאלה או בקשה על נושאי המלון:
    - breakfast, lunch, dinner, all_meals - ארוחות
    - lobby, pool, beach, synagogue, rules, wifi - מידע כללי
    - spa_transfer - כל דבר עם ספא / עיסוי / מסאז' / טיפול!
@@ -1393,16 +1850,24 @@ def ai_detect_intent(user_text, mode="main"):
      "בריכה מקורה", "סאונה", "חדר אדים", "טיפול זוגי"
    - room_service - שירות חדרים
 
-3. "request" - כל דבר אחר (מגבות, שמפו, מרכך, תיקון וכו')
+5. "separate" - רק אם האורח משלב באותו משפט בקשה לצוות ושאלת מידע אחרת.
+   דוגמה: "אני רוצה מגבות ולשאול מתי יש ארוחת בוקר".
+   במקרה כזה אין לטפל באף חלק בנפרד; החזר רק {"intent": "separate"}.
+
+6. "request" - כל דבר אחר (מגבות, שמפו, מרכך, תיקון וכו')
 
 ⚠️ "כן", "לא", "בסדר", "תודה" - תמיד "request"!
 
 החזר JSON:
-{"intent": "transfer"} / {"intent": "info", "topic": "spa_transfer"} / {"intent": "info", "topic": "wifi"} / {"intent": "request"}
+{"intent": "urgent"} / {"intent": "complaint"} / {"intent": "transfer"} / {"intent": "info", "topic": "spa_transfer"} / {"intent": "info", "topic": "wifi"} / {"intent": "separate"} / {"intent": "request"}
 """
             user_message = user_text
         elif mode == "transfer_response":
             system_prompt = """הקשר: שאלו "האם אתם רוצים שאעביר אתכם לנציג אנושי?"
+
+"transfer" (הסכמה) כולל: "כן", "נכון", "בטח", "בסדר", "תעבירו אותי", "אני רוצה".
+"end" (סירוב) כולל: "לא", "לא נכון", "לא תודה", "לא רוצה", "אין צורך".
+כל שאלה או בקשה אחרת היא "other" — גם אם היא שאלה על המלון.
 
 החזר תשובת JSON:
 {"answer": "transfer"} - הסכמה
@@ -1420,15 +1885,13 @@ def ai_detect_intent(user_text, mode="main"):
 החזר JSON: {"answer": "transfer"} / {"answer": "end"} / {"answer": "other"}
 """
             user_message = f"תשובת האורח: {user_text}"
-        response = client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
-            messages=[
+        response = create_ai_completion(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.1,
             max_tokens=100,
-            response_format={"type": "json_object"}
         )
         raw_content = response.choices[0].message.content
         if not raw_content or len(raw_content) < 5:
@@ -1438,6 +1901,11 @@ def ai_detect_intent(user_text, mode="main"):
                 return {"answer": "other"}
         result = json.loads(raw_content)
         return result
+    except AIProvidersUnavailable as e:
+        print(f"❌ Все AI-провайдеры недоступны: {e}")
+        if mode == "main":
+            return {"intent": "ai_unavailable"}
+        return {"answer": "ai_unavailable"}
     except Exception as e:
         print(f"⚠️ Ошибка классификатора: {e}")
         if mode == "main":
@@ -1448,6 +1916,82 @@ def ai_detect_intent(user_text, mode="main"):
 # ============================================================
 # ЗАВЕРШЕНИЯ
 # ============================================================
+def play_ai_unavailable_transfer():
+    """Сообщает о недоступности ИИ и завершает звонок для перевода в מרכזיה."""
+    print("☎️ AI недоступен → перевод в מרכזיה")
+    stop_ding_loop()
+    try:
+        unavailable_path = get_audio_path("ai_unavailable_transfer")
+        if unavailable_path:
+            play_audio(unavailable_path)
+        else:
+            speak("זמני לא ניתן לדבר איתי אני מעביר אותכם למרכזיה", language="he")
+    finally:
+        try:
+            stop_recording_and_save()
+        except Exception:
+            pass
+        update_room_chars(ROOM_NUMBER, 0, is_call_end=True)
+        stop_music()
+        stop_ding_loop()
+        time.sleep(1)
+        return finish_current_call()
+
+
+def play_urgent_transfer(urgent_text):
+    """Передаёт критическое обращение персоналу без TTS и финального вердикта."""
+    print("=" * 60)
+    print("🚨 URGENT: немедленный перевод к персоналу и WhatsApp")
+    print("=" * 60)
+    stop_ding_loop()
+    audio_path = None
+    try:
+        audio_path = stop_recording_and_save()
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить urgent-запись: {e}")
+    send_urgent_to_whatsapp(urgent_text, audio_path)
+
+    stop_path = get_audio_path("stop_request_and_changing_line", engine=VOICE_ENGINE)
+    if stop_path:
+        play_audio(stop_path)
+    else:
+        print("❌ Не найден stop_request_and_changing_line.mp3")
+    print("доделать логику когда программа будет готова")
+
+    update_room_chars(ROOM_NUMBER, 0, is_call_end=True)
+    stop_music()
+    stop_ding_loop()
+    time.sleep(1)
+    return finish_current_call()
+
+
+def play_complaint_transfer(complaint_text):
+    """Передаёт жалобу персоналу без TTS и финального вердикта."""
+    print("=" * 60)
+    print("⚠️ COMPLAINT: перевод к персоналу и WhatsApp")
+    print("=" * 60)
+    stop_ding_loop()
+    audio_path = None
+    try:
+        audio_path = stop_recording_and_save()
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить complaint-запись: {e}")
+    send_complaint_to_whatsapp(complaint_text, audio_path)
+
+    stop_path = get_audio_path("stop_request_and_changing_line", engine=VOICE_ENGINE)
+    if stop_path:
+        play_audio(stop_path)
+    else:
+        print("❌ Не найден stop_request_and_changing_line.mp3")
+    print("доделать логику когда программа будет готова")
+
+    update_room_chars(ROOM_NUMBER, 0, is_call_end=True)
+    stop_music()
+    stop_ding_loop()
+    time.sleep(1)
+    return finish_current_call()
+
+
 def play_transfer_complete():
     print("=" * 60)
     print("👤 ЗАВЕРШИТЬ ЛОГИКУ ПЕРЕВОДА НА ПЕРСОНАЛ")
@@ -1465,10 +2009,10 @@ def play_transfer_complete():
         stop_music()
         stop_ding_loop()
         time.sleep(1)
-        os._exit(0)
+        return finish_current_call()
     except Exception as e:
         print(f"❌ {e}")
-        os._exit(1)
+        return finish_current_call(exit_code=1)
 
 def play_spa_transfer_complete():
     print("=" * 60)
@@ -1487,10 +2031,10 @@ def play_spa_transfer_complete():
         stop_music()
         stop_ding_loop()
         time.sleep(1)
-        os._exit(0)
+        return finish_current_call()
     except Exception as e:
         print(f"❌ {e}")
-        os._exit(1)
+        return finish_current_call(exit_code=1)
 
 def play_greeting_with_delay():
     global mic_paused
@@ -1523,7 +2067,15 @@ def play_greeting_with_delay():
 # ============================================================
 def main():
     global transfer_to_staff_mode, spa_transfer_mode, room_service_mode, chars_this_call, verdict_played
-    global all_requests, staff_mode_active, waiting_for_response
+    global all_requests, staff_mode_active, waiting_for_response, mic_paused
+
+    if STARTUP_ELEVENLABS_STOP_REASON:
+        end_call_after_elevenlabs_limit(
+            STARTUP_ELEVENLABS_STOP_REASON,
+            tokens_depleted=True,
+        )
+        if call_end_event.is_set():
+            return True
 
     print("=" * 60)
     print(f"🎤 Ассистент — Комната {ROOM_NUMBER} ({VOICE_ENGINE.upper()})")
@@ -1550,6 +2102,9 @@ def main():
 
     while True:
         try:
+            if call_end_event.is_set():
+                print("☎️ Сессия завершена — возвращаю управление диспетчеру")
+                return True
             if verdict_played:
                 time.sleep(0.5)
                 continue
@@ -1576,6 +2131,9 @@ def main():
                         result = ai_detect_intent(user_text, mode="transfer_response")
                     answer = result.get("answer", "other")
                     print(f"📋 AI ответ: {answer}")
+                    if answer == "ai_unavailable":
+                        play_ai_unavailable_transfer()
+                        continue
                     if answer == "transfer":
                         staff_mode_active = True
                         waiting_for_response = False
@@ -1600,15 +2158,23 @@ def main():
                             update_activity()
                         continue
                     else:
+                        if transfer_to_staff_mode:
+                            print("🔄 Transfer: нужен ответ да или нет")
+                            required_path = get_audio_path("transfer_answer_required")
+                            if required_path:
+                                play_audio(required_path)
+                            else:
+                                speak("לפני שאני אוכל לעזור לכם בשאלות אחרות, נא תגידו אם אתם מעוניינים לדבר עם נציג אנושי.")
+                            update_activity()
+                            continue
                         print("🔄 Другое — выход из режима")
-                        transfer_to_staff_mode = False
                         spa_transfer_mode = False
                         room_service_mode = False
                         staff_mode_active = False
                         waiting_for_response = False
 
-                if waiting_for_response and (is_yes(user_text) or is_no(user_text)):
-                    print(f"🎯 Ответ '{user_text}' — финальный вердикт")
+                if waiting_for_response and (is_no(user_text) or is_natural_finish(user_text)):
+                    print(f"🎯 Ответ '{user_text}' — естественное завершение просьб")
                     if all_requests:
                         requests_text = ", ".join(all_requests)
                     else:
@@ -1618,11 +2184,48 @@ def main():
                     waiting_for_response = False
                     continue
 
+                if waiting_for_response and is_yes(user_text):
+                    print(f"🎯 Ответ '{user_text}' — ожидаем следующую просьбу")
+                    continue_path = get_audio_path("continue_conversation")
+                    if continue_path:
+                        mic_paused = True
+                        play_audio(continue_path)
+                        mic_paused = False
+                        print("🎤 Микрофон возобновлён")
+                    else:
+                        speak("מה עוד תרצו?", language="he")
+                    update_activity()
+                    continue
+
+                if is_wifi_related(user_text):
+                    audio_path = get_audio_path("info_wifi")
+                    if audio_path:
+                        print(f"📶 Интернет: {audio_path.name} ({VOICE_ENGINE})")
+                        play_audio(audio_path)
+                        update_activity()
+                        continue
+
                 print("⏳ AI определяет намерение...")
                 result = ai_detect_intent(user_text, mode="main")
                 intent = result.get("intent", "request")
                 topic = result.get("topic")
                 print(f"📋 Намерение: {intent}, Тема: {topic}")
+
+                if is_urgent_request(user_text, intent):
+                    if intent != "urgent":
+                        print("🚨 Urgent: сработала защитная проверка критической фразы")
+                    play_urgent_transfer(user_text)
+                    continue
+
+                if is_complaint_request(user_text, intent):
+                    if intent != "complaint":
+                        print("⚠️ Complaint: сработала защитная проверка явной жалобы")
+                    play_complaint_transfer(user_text)
+                    continue
+
+                if intent == "ai_unavailable":
+                    play_ai_unavailable_transfer()
+                    continue
 
                 if intent == "transfer":
                     print("👤 Перевод")
@@ -1634,6 +2237,23 @@ def main():
                         update_activity()
                     else:
                         speak("הבנתי. תרצו שאעביר אתכם לנציג אנושי?", language="he")
+                    continue
+
+                if intent == "separate":
+                    print("📌 Смешанный запрос: прошу разделить вопрос и просьбу")
+                    separate_path = get_audio_path("separate_request_or_question")
+                    if separate_path:
+                        # Запись, как и TTS, не должна попасть обратно в Whisper.
+                        # Явно фиксируем окончание, чтобы realtime-тест мог подтвердить его.
+                        mic_paused = True
+                        played = play_audio(separate_path)
+                        mic_paused = False
+                        if played:
+                            print(f"✅ Запись воспроизведена: {separate_path.name}")
+                        print("🎤 Микрофон возобновлён")
+                    else:
+                        speak("אשמח אם תפנו אליי עם בקשה או שאלה בנפרד. לדוגמה: אני רוצה מגבות לחדר — זו בקשה, ואחר כך בנפרד מתי ארוחת הבוקר? — זו שאלה.")
+                    update_activity()
                     continue
 
                 if intent == "info" and topic:
@@ -1667,13 +2287,41 @@ def main():
                         continue
 
                 print("⏳ Обработка просьбы...")
-                response, not_understood, requests_list = ask_ai_with_memory(user_text, language="he")
+                try:
+                    response, not_understood, requests_list, wait_for_more, dialogue_action = ask_ai_with_memory(user_text, language="he")
+                except AIProvidersUnavailable:
+                    play_ai_unavailable_transfer()
+                    continue
 
                 if requests_list:
                     for req in requests_list:
                         if req and req not in all_requests:
                             all_requests.append(req)
                             print(f"📝 Добавлено в просьбы: '{req}'")
+
+                # Не все естественные ответы удобно покрыть фиксированным
+                # списком. DeepSeek уже получил историю разговора и может
+                # безопасно определить, означает ли эта реплика «всё, спасибо».
+                if waiting_for_response and dialogue_action == "finish" and not requests_list:
+                    print(f"🎯 AI: '{user_text}' означает завершение просьб")
+                    requests_text = ", ".join(all_requests) if all_requests else "הבקשה שלכם"
+                    final_reply = f"העברתי את בקשתכם לצוות: {requests_text}. שיהיה לכם חופשה מהנה!"
+                    waiting_for_response = False
+                    speak(final_reply, language="he")
+                    continue
+
+                if waiting_for_response and dialogue_action == "continue" and not requests_list:
+                    print(f"🎯 AI: '{user_text}' — гость продолжает разговор")
+                    continue_path = get_audio_path("continue_conversation")
+                    if continue_path:
+                        mic_paused = True
+                        play_audio(continue_path)
+                        mic_paused = False
+                        print("🎤 Микрофон возобновлён")
+                    else:
+                        speak("מה עוד תרצו?", language="he")
+                    update_activity()
+                    continue
 
                 if not_understood:
                     not_understood_count += 1
@@ -1701,15 +2349,19 @@ def main():
                             update_room_chars(ROOM_NUMBER, 0, is_call_end=True)
                             stop_music()
                             stop_ding_loop()
-                            os._exit(0)
+                            finish_current_call()
+                            continue
                 else:
                     not_understood_count = 0
+                    # Финальный вердикт имеет право создать только локальная
+                    # ветка is_no() выше. Не даём модели завершить обычный
+                    # звонок самовольно старой фразой из прежнего prompt.
                     if "שיהיה לכם חופשה מהנה" in response:
-                        speak(response, language="he")
-                    else:
-                        if "האם אתם רוצים עוד משהו" in response:
-                            waiting_for_response = True
-                        speak(response, language="he")
+                        print("⚠️ AI попытался выдать финальный вердикт раньше ответа гостя")
+                        response = "בשמחה, הבקשה נרשמה. האם אתם רוצים עוד משהו?"
+                        wait_for_more = True
+                    waiting_for_response = wait_for_more
+                    speak(response, language="he")
 
             time.sleep(0.1)
 
@@ -1718,12 +2370,48 @@ def main():
             stop_music()
             stop_ding_loop()
             stop_recording_and_save()
-            break
+            return False
         except Exception as e:
             print(f"❌ Ошибка main: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(1)
 
+
+def run_continuous_service():
+    """Последовательно обслуживает звонки, не перезагружая модели."""
+    print("=" * 60)
+    print("☎️ ПОСТОЯННЫЙ РЕЖИМ: модели остаются загруженными между звонками")
+    print("Для остановки диспетчера нажмите Ctrl+C.")
+    print("=" * 60)
+    preload_static_audio()
+
+    first_call = True
+    while True:
+        try:
+            if first_call:
+                configure_call(ROOM_NUMBER)
+                first_call = False
+            else:
+                print("\n☎️ Готов к следующему звонку")
+                next_room, _ = ask_room_number()
+                configure_call(next_room)
+
+            reset_call_runtime_state()
+            result = main()
+            stop_call_workers()
+            if result is False:
+                print("👋 Постоянный режим остановлен пользователем")
+                return
+            print("✅ Звонок завершён. Модели остаются в памяти.")
+        except KeyboardInterrupt:
+            stop_call_workers()
+            print("\n👋 Постоянный режим остановлен")
+            return
+
+
 if __name__ == "__main__":
-    main()
+    if CONTINUOUS_SERVICE_MODE:
+        run_continuous_service()
+    else:
+        main()

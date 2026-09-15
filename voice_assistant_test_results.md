@@ -1,0 +1,54 @@
+# Voice assistant test results
+
+Дата: 2026-09-14 20:49:21
+
+- PASS: `01_towels_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `02_toilet_paper_kokoro.mp3` → `{'intent': 'request'}`
+- FAIL: `03_shampoo_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `04_clean_room_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `05_extra_pillow_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `06_blanket_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `07_water_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `08_light_bulb_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `09_air_conditioner_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `10_bad_smell_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `11_leaking_shower_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `12_no_hot_water_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `13_broken_door_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `14_key_card_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `15_safe_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `16_tv_kokoro.mp3` → `{'intent': 'request'}`
+- FAIL: `17_wifi_problem_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `18_dirty_bathroom_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `19_missing_towels_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `20_bed_sheets_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `21_noise_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `22_smoking_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `23_security_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `24_lost_key_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `25_locked_out_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `26_medical_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `27_maintenance_urgent_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `28_fridge_kokoro.mp3` → `{'intent': 'request'}`
+- FAIL: `29_toilet_flush_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `30_window_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `31_room_service_kokoro.mp3` → `{'intent': 'info', 'topic': 'room_service'}`
+- PASS: `32_breakfast_kokoro.mp3` → `{'intent': 'info', 'topic': 'breakfast'}`
+- FAIL: `33_spa_massage_kokoro.mp3` → `{'intent': 'info', 'topic': 'spa_transfer'}`
+- PASS: `34_manager_kokoro.mp3` → `{'intent': 'transfer'}`
+- FAIL: `35_human_agent_kokoro.mp3` → `{'intent': 'transfer'}`
+- PASS: `36_complaint_kokoro.mp3` → `{'intent': 'transfer'}`
+- PASS: `37_multiple_supplies_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `38_cleaning_and_towels_kokoro.mp3` → `{'intent': 'request'}`
+- FAIL: `39_smell_and_leak_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `40_security_noise_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `41_broken_ac_night_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `42_no_toilet_paper_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `43_wrong_room_cleaning_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `44_flooding_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `45_electrical_smell_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `46_lost_belonging_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `47_child_locked_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `48_unsafe_person_kokoro.mp3` → `{'intent': 'request'}`
+- PASS: `49_two_topics_kokoro.mp3` → `{'intent': 'separate'}`
+- PASS: `50_manager_after_issue_kokoro.mp3` → `{'intent': 'transfer'}`

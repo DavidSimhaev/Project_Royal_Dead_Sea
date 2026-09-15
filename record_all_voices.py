@@ -40,10 +40,12 @@ KOKORO_VOICE_PATH = KOKORO_BASE / "voices" / "he_shaul.pt"
 KOKORO_DIR = HERE / "Kokoro_RECORD"
 ELEVENLABS_DIR = HERE / "ElevenLabs_RECORD"
 TEST_AUTO_REQUEST_DIR = HERE / "test_auto_request_mp3"
+TEST_AUTO_CONFIRMATION_DIR = HERE / "test_auto_confirmation_mp3"
 
 KOKORO_DIR.mkdir(exist_ok=True)
 ELEVENLABS_DIR.mkdir(exist_ok=True)
 TEST_AUTO_REQUEST_DIR.mkdir(exist_ok=True)
+TEST_AUTO_CONFIRMATION_DIR.mkdir(exist_ok=True)
 
 # ============================================================
 # ⭐ НАСТРОЙКИ DEEPSEEK
@@ -234,7 +236,7 @@ ALL_RECORDS = {
 # ============================================================
 # 🗣️ ФУНКЦИЯ ЗАПИСИ KOKORO
 # ============================================================
-def record_kokoro(text, output_file, description):
+def record_kokoro(text, output_file, description, output_dir=KOKORO_DIR):
     """Записывает аудио через Kokoro (МУЖСКОЙ голос)"""
     print(f"🎤 KOKORO (мужской): {description}")
     
@@ -269,7 +271,7 @@ def record_kokoro(text, output_file, description):
             if max_val > 0.01:
                 audio_data = audio_data / max_val * 0.95
             
-            output_path = KOKORO_DIR / output_file
+            output_path = output_dir / output_file
             sf.write(str(output_path), audio_data, 24000)
             
             print(f"✅ Сохранено: {output_path.name} ({len(audio_data) / 24000:.2f} сек)")
@@ -334,8 +336,79 @@ def record_elevenlabs(text, output_file, description):
 # ============================================================
 # 🧪 АВТОМАТИЧЕСКИЕ ТЕСТОВЫЕ ЗАПРОСЫ ДЛЯ МИКРОФОНА
 # ============================================================
+AUTO_TEST_CASES = [
+    ("01_towels", "אני רוצה מגבות לחדר", "request"),
+    ("02_toilet_paper", "נגמר נייר הטואלט בחדר", "request"),
+    ("03_shampoo", "אפשר שמפו ומרכך בבקשה", "request"),
+    ("04_clean_room", "אפשר לנקות את החדר שלי", "request"),
+    ("05_extra_pillow", "אני צריך כרית נוספת", "request"),
+    ("06_blanket", "קר לי, אפשר שמיכה נוספת", "request"),
+    ("07_water", "אפשר בקבוקי מים לחדר", "request"),
+    ("08_light_bulb", "המנורה ליד המיטה לא עובדת", "request"),
+    ("09_air_conditioner", "המזגן שלי לא עובד", "request"),
+    ("10_bad_smell", "יש לי ריח משריח בחדר", "request"),
+    ("11_leaking_shower", "יש נזילה מהמקלחת", "request"),
+    ("12_no_hot_water", "אין מים חמים במקלחת", "request"),
+    ("13_broken_door", "הדלת של החדר לא נסגרת", "request"),
+    ("14_key_card", "הכרטיס לחדר לא פותח את הדלת", "request"),
+    ("15_safe", "הכספת בחדר לא עובדת", "request"),
+    ("16_tv", "הטלוויזיה בחדר לא נדלקת", "request"),
+    ("17_wifi_problem", "האינטרנט בחדר שלי לא עובד", "info"),
+    ("18_dirty_bathroom", "חדר האמבטיה מלוכלך מאוד", "request"),
+    ("19_missing_towels", "לא החליפו לנו מגבות היום", "request"),
+    ("20_bed_sheets", "אפשר להחליף מצעים במיטה", "request"),
+    ("21_noise", "יש רעש חזק מהחדר לידינו", "request"),
+    ("22_smoking", "מישהו מעשן במסדרון", "request"),
+    ("23_security", "ראיתי אדם זר ליד החדר שלי", "request"),
+    ("24_lost_key", "איבדתי את המפתח לחדר", "request"),
+    ("25_locked_out", "ננעלתי מחוץ לחדר שלי", "request"),
+    ("26_medical", "אורח בחדר ליד מרגיש לא טוב", "request"),
+    ("27_maintenance_urgent", "יש מים על הרצפה והחשמל ליד המקלחת", "request"),
+    ("28_fridge", "המקרר בחדר לא מקרר", "request"),
+    ("29_toilet_flush", "הניאגרה בשירותים לא מפסיקה לרוץ", "request"),
+    ("30_window", "החלון בחדר לא נסגר ויש רוח", "request"),
+    ("31_room_service", "אני רוצה להזמין אוכל לחדר", "info"),
+    ("32_breakfast", "מתי ארוחת הבוקר מחר", "info"),
+    ("33_spa_massage", "אני רוצה להזמין עיסוי", "info"),
+    ("34_manager", "אני רוצה לדבר עם מנהל", "transfer"),
+    ("35_human_agent", "אפשר לדבר עם נציג אנושי", "transfer"),
+    ("36_complaint", "יש לי תלונה ואני רוצה לדבר עם מישהו", "transfer"),
+    ("37_multiple_supplies", "המזגן לא עובד ואין לי נייר טואלט", "request"),
+    ("38_cleaning_and_towels", "אפשר ניקיון לחדר וגם מגבות חדשות", "request"),
+    ("39_smell_and_leak", "יש ריח רע בחדר וגם נזילה מתחת לכיור", "request"),
+    ("40_security_noise", "יש אנשים שצועקים במסדרון ואני מפחד", "request"),
+    ("41_broken_ac_night", "המזגן הפסיק לעבוד בלילה והחדר חם מאוד", "request"),
+    ("42_no_toilet_paper", "נגמר נייר הטואלט ואנחנו צריכים אותו בדחיפות", "request"),
+    ("43_wrong_room_cleaning", "נכנסו לחדר שלנו בזמן שלא רצינו ניקיון", "request"),
+    ("44_flooding", "המים מהמקלחת יוצאים לחדר וכל הרצפה רטובה", "request"),
+    ("45_electrical_smell", "יש ריח שרוף מהשקע ליד הטלוויזיה", "request"),
+    ("46_lost_belonging", "השארתי את התיק שלי בלובי ולא מוצא אותו", "request"),
+    ("47_child_locked", "הילד שלי ננעל בחדר ואני צריך עזרה", "request"),
+    ("48_unsafe_person", "מישהו דופק בדלת שלנו ולא מזדהה", "request"),
+    ("49_two_topics", "אני רוצה מגבות ולשאול מתי יש ארוחת בוקר", "separate"),
+    ("50_manager_after_issue", "אחרי כל הבעיות בחדר אני רוצה לדבר עם מנהל", "transfer"),
+    # Сложные интеграционные сценарии: urgent, complaint, request, separate.
+    ("51_smoke_and_stranger", "יש עשן במסדרון ליד החדר שלנו ואדם זר מנסה לפתוח דלתות, אנחנו מפחדים", "urgent"),
+    ("52_room_entry_complaint", "ביקשנו במפורש לא להיכנס לחדר, אבל בזמן שהילדים ישנו נכנסו, הזיזו לנו דברים ולא השאירו פתק", "complaint"),
+    ("53_multiple_maintenance", "המזגן מרעיש ולא מקרר, האור באמבטיה מהבהב והדלת למרפסת לא נסגרת", "request"),
+    ("54_pillow_and_pool_info", "אני צריך כרית נוספת, וגם רציתי לדעת באיזו קומה נמצאת הבריכה ומה השעות שלה", "separate"),
+]
+
 AUTO_TEST_REQUESTS = {
-    "towels_to_room_kokoro.mp3": "אני רוצה מגבות לחדר",
+    f"{name}_kokoro.mp3": text for name, text, _expected in AUTO_TEST_CASES
+}
+
+AUTO_CONFIRMATION_RESPONSES = {
+    "yes_kokoro.mp3": "כן",
+    "no_kokoro.mp3": "לא",
+    "correct_kokoro.mp3": "נכון",
+    "not_correct_kokoro.mp3": "לא נכון",
+}
+
+DIALOGUE_LOGIC_RECORDS = {
+    "transfer_answer_required": "לפני שאני אוכל לעזור לכם בשאלות אחרות, נא תגידו אם אתם מעוניינים לדבר עם נציג אנושי.",
+    "separate_request_or_question": "אשמח אם תפנו אליי עם בקשה או שאלה בנפרד. לדוגמה: אני רוצה מגבות לחדר — זו בקשה, ואחר כך בנפרד מתי ארוחת הבוקר? — זו שאלה.",
+    "ai_unavailable_transfer": "זמני לא ניתן לדבר איתי אני מעביר אותכם למרכזיה",
 }
 
 def create_auto_test_requests():
@@ -344,37 +417,43 @@ def create_auto_test_requests():
     print("🧪 СОЗДАНИЕ АВТОМАТИЧЕСКИХ ТЕСТОВЫХ ЗАПРОСОВ")
     print(f"📁 Папка: {TEST_AUTO_REQUEST_DIR}")
     print("=" * 60)
-    created = []
-    for filename, text in AUTO_TEST_REQUESTS.items():
-        print(f"\n📝 {text}")
-        try:
-            text_with_niqqud = g2p.phonemize(text) if g2p else text
-            pieces = []
-            for chunk in re.split(r"(?<=[.!?])\\s+", text_with_niqqud.strip()):
-                if not chunk:
-                    continue
-                phonemes, _ = phonemize_hebrew(chunk)
-                if not phonemes:
-                    continue
-                n = min(len(phonemes), voice.shape[0]) - 1
-                with torch.no_grad():
-                    output = km(phonemes, voice[n], speed=0.9, return_output=True)
-                pieces.append(output.audio.cpu().numpy())
-            if not pieces:
-                print("❌ Kokoro не создал аудио")
-                continue
-            audio_data = np.clip(np.concatenate(pieces) * 5.0, -1.0, 1.0)
-            peak = np.max(np.abs(audio_data))
-            if peak > 0.01:
-                audio_data = audio_data / peak * 0.95
-            output_path = TEST_AUTO_REQUEST_DIR / filename
-            sf.write(str(output_path), audio_data, 24000)
-            created.append(output_path)
-            print(f"✅ Сохранено: {output_path}")
-        except Exception as e:
-            print(f"❌ Ошибка создания {filename}: {e}")
+    created = [
+        record_kokoro(text, filename, f"Тест {filename}", TEST_AUTO_REQUEST_DIR)
+        for filename, text in AUTO_TEST_REQUESTS.items()
+    ]
+    created = [path for path in created if path]
     print(f"\n✅ Создано тестовых записей: {len(created)}")
     return created
+
+def create_auto_confirmation_responses():
+    """Создаёт Kokoro-записи ответов для проверки режима transfer."""
+    print("\n🧪 СОЗДАНИЕ ПОДТВЕРЖДЕНИЙ TRANSFER")
+    created = [
+        record_kokoro(text, filename, f"Подтверждение transfer: {text}", TEST_AUTO_CONFIRMATION_DIR)
+        for filename, text in AUTO_CONFIRMATION_RESPONSES.items()
+    ]
+    return [path for path in created if path]
+
+def create_dialogue_logic_records():
+    """Создаёт фразы ассистента для transfer и смешанных запросов."""
+    print("\n🎙️ СОЗДАНИЕ ЗАПИСЕЙ ЛОГИКИ ДИАЛОГА")
+    created = []
+    for name, text in DIALOGUE_LOGIC_RECORDS.items():
+        kokoro = record_kokoro(text, f"{name}_kokoro.mp3", name)
+        eleven = record_elevenlabs(text, f"{name}.mp3", name)
+        if kokoro and eleven:
+            created.append(name)
+    print(f"✅ Создано пар записей: {len(created)}")
+    return created
+
+def create_ai_unavailable_transfer_records():
+    """Создаёт фразу для перевода в מרכזיה при недоступности AI."""
+    name = "ai_unavailable_transfer"
+    text = DIALOGUE_LOGIC_RECORDS[name]
+    print("\n☎️ СОЗДАНИЕ ЗАПИСИ: AI НЕДОСТУПЕН → מרכזיה")
+    kokoro = record_kokoro(text, f"{name}_kokoro.mp3", name)
+    eleven = record_elevenlabs(text, f"{name}.mp3", name)
+    return bool(kokoro and eleven)
 
 # ============================================================
 # ⭐ УНИВЕРСАЛЬНЫЙ ИНТЕРАКТИВНЫЙ РЕЖИМ
@@ -627,13 +706,28 @@ def main():
     print("   3 - Только показать существующие файлы")
     print("   4 - 🎤 ИНТЕРАКТИВНО: ТОЛЬКО Kokoro (мужской голос)")
     print("   5 - 🎤 ИНТЕРАКТИВНО: ТОЛЬКО ElevenLabs (БЕЗ перевода рода)")
-    print("   6 - 🧪 Создать тестовый запрос Kokoro для самотеста")
+    print("   6 - 🧪 Создать 50 тестовых запросов Kokoro для самотеста")
+    print("   7 - 🧪 Создать Kokoro-подтверждения для transfer")
+    print("   8 - 🎙️ Создать записи логики transfer и смешанного запроса")
+    print("   9 - ☎️ Создать запись AI недоступен → מרכזיה")
     print("=" * 60)
     
-    choice = input("Ваш выбор (1/2/3/4/5/6): ").strip()
+    choice = input("Ваш выбор (1/2/3/4/5/6/7/8/9): ").strip()
 
     if choice == '6':
         create_auto_test_requests()
+        return
+
+    if choice == '7':
+        create_auto_confirmation_responses()
+        return
+
+    if choice == '8':
+        create_dialogue_logic_records()
+        return
+
+    if choice == '9':
+        create_ai_unavailable_transfer_records()
         return
     
     # ⭐ ИНТЕРАКТИВ: ОБА ДИКТОРА (с авто-переводом рода)
